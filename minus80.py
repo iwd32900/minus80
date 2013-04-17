@@ -195,7 +195,7 @@ def do_backup(filename_iter, s3bucket, db):
     upload_file(s3bucket, "README_%s.txt" % VERSION, __file__)
     for relfile in filename_iter:
         try:
-            absfile = os.realpath(relfile) # eliminates symbolic links and does abspath()
+            absfile = osp.realpath(relfile) # eliminates symbolic links and does abspath()
             if osp.isdir(absfile):
                 logger.info("SKIP_DIR %s" % absfile)
                 continue
@@ -209,7 +209,7 @@ def do_backup(filename_iter, s3bucket, db):
                 logger.info("SKIP_KNOWN %s %s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(known_file['updated'])), absfile))
                 continue
             # Can't skip it.  Calculate the hashes!
-            datahash = hash_file_contents(absfile)
+            datahash = hash_file_content(absfile)
             fileinfo = get_file_info(absfile, datahash)
             infohash = hash_string(fileinfo)
             indexkey = "index/%s/%s.json" % (datahash, infohash)
@@ -237,7 +237,7 @@ def do_backup(filename_iter, s3bucket, db):
 
 def main(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument("config", metavar="CONFIG.json", nargs=1, type=argparse.FileType('r'))
+    parser.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
     args = parser.parse_args(argv)
     config = json.load(args.config)
 
@@ -252,7 +252,7 @@ def main(argv):
     if 'days_to_glacier' in config: set_lifecycle(s3bucket, config['days_to_glacier'])
 
     filename_iter = (line.rstrip("\r\n") for line in sys.stdin)
-    do_backup(filename_iter, s3bucket)
+    do_backup(filename_iter, s3bucket, db)
 
     return 0
 
