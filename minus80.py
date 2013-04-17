@@ -204,9 +204,9 @@ def do_backup(filename_iter, s3bucket, db):
             # If file of same name, modification date, and size is in database, we can skip it.
             mtime = osp.getmtime(absfile)
             fsize = osp.getsize(absfile)
-            known_file = db.execute("SELECT * FROM files WHERE abspath = ? AND mtime = ? AND size = ?", (absfile, mtime, fsize)).fetchone() # or None
+            known_file = db.execute("SELECT updated FROM files WHERE abspath = ? AND mtime = ? AND size = ?", (absfile, mtime, fsize)).fetchone() # or None
             if known_file is not None:
-                logger.info("SKIP_KNOWN %s %s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(known_file['updated'])), absfile))
+                logger.info("SKIP_KNOWN %s %s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(known_file[0])), absfile))
                 continue
             # Can't skip it.  Calculate the hashes!
             datahash = hash_file_content(absfile)
@@ -241,7 +241,8 @@ def main(argv):
     args = parser.parse_args(argv)
     config = json.load(args.config)
 
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(levelname)s\t%(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
+    logging.getLogger("boto").setLevel(logging.INFO)
     global logger
     logger = logging
 
