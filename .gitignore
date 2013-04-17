@@ -1,3 +1,7 @@
+# Config files
+*.json
+
+# Byte code
 *.py[cod]
 
 # C extensions

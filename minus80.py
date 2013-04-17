@@ -5,6 +5,26 @@ This is -80 (minus80), a tool for long-term archival backup to Amazon S3 and Gla
 If you're reading this on Amazon, this file both describes the data format and
 contains code for restoring the backup to your local computer.  Keep reading.
 
+
+Getting Started
+===============
+Sign up for Amazon Web Services (AWS) at http://aws.amazon.com/
+You'll need to sign up for (at a minimum) S3, Glacier, and SNS.
+
+Create a configuration file in JSON format that looks like this:
+
+    {
+        "aws_access_key": "XXX",
+        "aws_secret_key": "XXX",
+        "aws_s3_bucket": "XXX",
+        "days_to_glacier": 30,
+        "file_database": "~/.minus80.sqlite3",
+    }
+
+Replace the "XXX" with appropriate values from your new AWS acount.
+The "days_to_glacier" is optional;  if omitted, Glacier will not be used.
+
+
 Usage - Backup
 ==============
 Storage costs can be reduced by setting up a bucket lifecycle rule that transfers
@@ -17,12 +37,10 @@ config file includes a 'days_to_glacier' entry.  You can always delete or
 disable it later from the AWS control panel.
 
 
-
 Usage - Restore
 ===============
 The restore function hasn't been written yet.  I mentioned this was for
 disaster recovery, right?  See "Data Format", below.
-
 
 
 Data Format
@@ -52,7 +70,6 @@ This is purely for efficiency -- if a file's size and mtime have not changed
 since the last backup, it is assumed to already be in the archive, and is skipped.
 This saves recalculating hashes for thousands of files.  However, if the local
 database is deleted, the next backup attempt will verify that each file is in S3.
-
 
 
 Philosophy
@@ -96,15 +113,6 @@ VERSION = '0.1.0'
 import argparse, hashlib, json, logging, os, sqlite3, sys, time
 import os.path as osp
 import boto
-
-#TODO: replace this with a JSON config file
-config = {
-    'aws_access_key': 'XXX',
-    'aws_secret_key': 'XXX',
-    'aws_s3_bucket': 'XXX',
-    #'days_to_glacier': 30,
-    'file_database': '.minus80.sqlite3',
-    }
 
 def init_db(dbpath):
     db = sqlite3.connect(osp.expanduser(dbpath))
@@ -229,7 +237,10 @@ def do_backup(filename_iter, s3bucket, db):
 
 def main(argv):
     parser = argparse.ArgumentParser()
+    parser.add_argument("config", metavar="CONFIG.json", nargs=1, type=argparse.FileType('r'))
     args = parser.parse_args(argv)
+    config = json.load(args.config)
+
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(levelname)s\t%(message)s')
     global logger
     logger = logging
