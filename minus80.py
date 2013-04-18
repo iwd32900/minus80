@@ -285,6 +285,21 @@ def do_thaw(s3bucket, for_days, gb_per_hr):
     else:
         logger.warning("All objects thawed; ready to start download")
 
+def do_download(s3bucket, destdir):
+    for key in s3bucket.list():
+        try:
+            localname = osp.join(destdir, *key.name.lstrip("/").split("/"))
+            if osp.lexists(localname) and osp.getsize(localname) == key.size:
+                logger.debug("EXISTS %s" % localname)
+                continue
+            localdir = osp.dirname(localname)
+            if not osp.isdir(localdir): os.makedirs(localdir)
+            logger.debug("DOWNLOAD_READY %s %s" % (key.name, localname))
+            key.get_contents_to_filename(localname)
+            logger.info("DOWNLOAD_DONE %s %s" % (key.name, localname))
+        except Exception, ex:
+            logger.error("ERROR %s %s" % (key.name, ex))
+
 def main(argv):
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='cmd_name', help='command to run')
@@ -292,6 +307,9 @@ def main(argv):
     p_archive.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
     p_thaw = subparsers.add_parser('thaw', help='restore files from Glacier to normal S3')
     p_thaw.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
+    p_download = subparsers.add_parser('download', help='pull down all files from normal S3')
+    p_download.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
+    p_download.add_argument("download_dir", metavar="DOWNLOAD_DIR")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
@@ -315,6 +333,8 @@ def main(argv):
         do_archive(filename_iter, s3bucket, db)
     elif args.cmd_name == 'thaw':
         do_thaw(s3bucket, config['restore_for_days'], config['restore_gb_per_hr'])
+    elif args.cmd_name == 'download':
+        do_download(s3bucket, args.download_dir)
     else:
         assert False, "Shouldn't be able to get here!"
 
