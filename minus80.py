@@ -9,7 +9,7 @@ contains code for restoring the backup to your local computer.  Keep reading.
 Getting Started
 ===============
 Sign up for Amazon Web Services (AWS) at http://aws.amazon.com/
-You'll need to sign up for (at a minimum) S3, Glacier, and SNS.
+You'll need to sign up for (at a minimum) S3 and Glacier.
 
 Create a configuration file in JSON format that looks like this:
 
@@ -18,7 +18,9 @@ Create a configuration file in JSON format that looks like this:
         "aws_secret_key": "XXX",
         "aws_s3_bucket": "XXX",
         "days_to_glacier": 30,
-        "file_database": "~/.minus80.sqlite3",
+        "restore_for_days": 30,
+        "restore_gb_per_hr": 1,
+        "file_database": "~/.minus80.sqlite3"
     }
 
 Replace the "XXX" with appropriate values from your new AWS acount.
@@ -39,8 +41,31 @@ disable it later from the AWS control panel.
 
 Usage - Restore
 ===============
-The restore function hasn't been written yet.  I mentioned this was for
-disaster recovery, right?  See "Data Format", below.
+Restore proceeds in three stages: 'thaw', 'download', and 'rebuild'.
+
+1.  Thaw.  The thaw command traverses the entire S3 bucket.  Any object
+    that has been moved to Glacier is restored to S3, for a period of
+    `restore_for_days` days.  According to Glacier documentation,
+    each thaw command will take 3-5 hours to complete;  after that, files
+    can be downloaded from S3 normally.
+
+    You will be charged based on your peak hourly restore rate.  My reading
+    of the rules is that you will charged up to $7.20 multiplied by your
+    peak restore rate in gigabytes per hour.  Charges may be less depending
+    on how much you have stored with Amazon, but since we're contemplating
+    a full restore, probably not much less.  The thaw command will try to
+    limit restores to a rate of `restore_gb_per_hr`.  At a setting of 1, it
+    will take 100 hours (~4 days) to thaw 100 GB worth of data, and you
+    should leave your computer running (not sleeping) that whole time.
+    Additional charges will apply for S3 storage during the restore period,
+    and bandwidth for downloading.
+
+2.  Download.  The download command will pull down a perfect copy of all
+    the data in your S3 bucket.  If any of it has been transferred to
+    Glacier, you should run 'thaw' first and wait 5 hours after it finishes.
+
+3.  Rebuild.  The rebuild command will re-organize the downloaded data into
+    a reasonable approximation of the structure you archived originally.
 
 
 Data Format
@@ -108,7 +133,7 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 
 import argparse, hashlib, json, logging, os, sqlite3, sys, time
 import os.path as osp
@@ -185,11 +210,13 @@ def get_file_info(absfile, datahash):
         'path':absfile,
         'size':osp.getsize(absfile),
         'mtime':osp.getmtime(absfile),
-        'stored':time.time(),
+        # We don't want to do this, or the hash and content change every time!
+        # mtime should really be enough info to reconstruct the file system state.
+        #'stored':time.time(),
         'data':datahash,
     }, separators=(',', ':'), sort_keys=True)
 
-def do_backup(filename_iter, s3bucket, db):
+def do_archive(filename_iter, s3bucket, db):
     # Make sure current documentation exists in bucket.
     # We actually upload this whole file, to provide unambiguous info and a way to restore.
     upload_file(s3bucket, "README_%s.txt" % VERSION, __file__)
@@ -237,23 +264,32 @@ def do_backup(filename_iter, s3bucket, db):
 
 def main(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
+    subparsers = parser.add_subparsers(dest='cmd_name', help='command to run')
+    p_archive = subparsers.add_parser('archive', help='store files listed on stdin to S3/Glacier')
+    p_archive.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
     args = parser.parse_args(argv)
-    config = json.load(args.config)
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
     logging.getLogger("boto").setLevel(logging.INFO)
     global logger
     logger = logging
 
-    db = init_db(config['file_database'])
+    # Shared initialization for subcommands:
+    if 'config' in args:
+        config = json.load(args.config)
+        db = init_db(config['file_database'])
 
-    s3conn = boto.connect_s3(config['aws_access_key'], config['aws_secret_key'])
-    s3bucket = s3conn.create_bucket(config['aws_s3_bucket']) # just returns Bucket if exists
-    if 'days_to_glacier' in config: set_lifecycle(s3bucket, config['days_to_glacier'])
+        s3conn = boto.connect_s3(config['aws_access_key'], config['aws_secret_key'])
+        s3bucket = s3conn.create_bucket(config['aws_s3_bucket']) # just returns Bucket if exists
 
-    filename_iter = (line.rstrip("\r\n") for line in sys.stdin)
-    do_backup(filename_iter, s3bucket, db)
+    # Run subcommand
+    if args.cmd_name == 'archive':
+        if 'days_to_glacier' in config:
+            set_lifecycle(s3bucket, config['days_to_glacier'])
+        filename_iter = (line.rstrip("\r\n") for line in sys.stdin)
+        do_archive(filename_iter, s3bucket, db)
+    else:
+        assert False, "Shouldn't be able to get here!"
 
     return 0
 
