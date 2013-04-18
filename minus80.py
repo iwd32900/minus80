@@ -135,7 +135,7 @@ all data into Glacier for permanent storage.
 # so a new copy gets stored in the archive!
 VERSION = '0.1.1'
 
-import argparse, hashlib, json, logging, os, sqlite3, sys, time
+import argparse, datetime, hashlib, json, logging, os, sqlite3, sys, time
 import os.path as osp
 import boto
 
@@ -262,11 +262,36 @@ def do_archive(filename_iter, s3bucket, db):
         except Exception, ex:
             logger.error("ERROR %s %s" % (relfile, ex))
 
+def do_thaw(s3bucket, for_days, gb_per_hr):
+    sec_per_byte = 1. / (gb_per_hr * 1.0e9 / 3600.)
+    thawing_objs = 0
+    for key in s3bucket.list():
+        if key.storage_class != 'GLACIER':
+            logger.debug("NOT_FROZEN %s" % key.name)
+            continue
+        if key.expiry_date:
+            logger.debug("THAW_DONE %s" % key.name)
+            continue
+        thawing_objs += 1
+        if key.ongoing_restore:
+            logger.debug("THAW_IN_PROGRESS %s" % key.name)
+            continue
+        logger.debug("READY_THAW %s" % key.name)
+        time.sleep(sec_per_byte * key.size)
+        key.restore(for_days)
+        logger.info("THAW_STARTED %s" % key.name)
+    if thawing_objs:
+        logger.warning("Thawing %i objects; should be complete by %s" % (thawing_objs, datetime.datetime.now() + datetime.timedelta(hours=5)))
+    else:
+        logger.warning("All objects thawed; ready to start download")
+
 def main(argv):
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='cmd_name', help='command to run')
     p_archive = subparsers.add_parser('archive', help='store files listed on stdin to S3/Glacier')
     p_archive.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
+    p_thaw = subparsers.add_parser('thaw', help='restore files from Glacier to normal S3')
+    p_thaw.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
@@ -288,6 +313,8 @@ def main(argv):
             set_lifecycle(s3bucket, config['days_to_glacier'])
         filename_iter = (line.rstrip("\r\n") for line in sys.stdin)
         do_archive(filename_iter, s3bucket, db)
+    elif args.cmd_name == 'thaw':
+        do_thaw(s3bucket, config['restore_for_days'], config['restore_gb_per_hr'])
     else:
         assert False, "Shouldn't be able to get here!"
 
