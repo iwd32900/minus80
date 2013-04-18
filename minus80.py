@@ -216,6 +216,19 @@ def get_file_info(absfile, datahash):
         'data':datahash,
     }, separators=(',', ':'), sort_keys=True)
 
+def s3_path_to_local(localroot, path):
+    """
+    When translating S3 paths to local, insert directory separators
+    after the second and fourth characters of the first hash.
+    This is a nod to practicality, because most filesystems start to
+    perform badly when a directory contains more than 1,000 files.
+    """
+    path = path.lstrip("/").split("/") # shouldn't be a leading slash, but just in case
+    if path[0] in ("data","index") and len(path) >= 2 and len(path[1]) > 4:
+        h = path[1]
+        path = [path[0], h[0:2], h[2:4], h[4:]] + path[2:]
+    return osp.join(localroot, *path)
+
 def do_archive(filename_iter, s3bucket, db):
     # Make sure current documentation exists in bucket.
     # We actually upload this whole file, to provide unambiguous info and a way to restore.
@@ -288,7 +301,7 @@ def do_thaw(s3bucket, for_days, gb_per_hr):
 def do_download(s3bucket, destdir):
     for key in s3bucket.list():
         try:
-            localname = osp.join(destdir, *key.name.lstrip("/").split("/"))
+            localname = s3_path_to_local(destdir, key.name)
             if osp.lexists(localname) and osp.getsize(localname) == key.size:
                 logger.debug("EXISTS %s" % localname)
                 continue
