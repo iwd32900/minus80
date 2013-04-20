@@ -24,6 +24,8 @@ Create a configuration file in JSON format that looks like this:
     }
 
 Replace the "XXX" with appropriate values from your new AWS acount.
+Your bucket name must be globally unique, so pick something no one else
+is likely to have used.
 The "days_to_glacier" is optional;  if omitted, Glacier will not be used.
 
 
@@ -133,9 +135,9 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.1.1'
+VERSION = '0.2.0'
 
-import argparse, datetime, hashlib, json, logging, os, sqlite3, sys, time
+import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
 import os.path as osp
 import boto
 
@@ -313,6 +315,29 @@ def do_download(s3bucket, destdir):
         except Exception, ex:
             logger.error("ERROR %s %s" % (key.name, ex))
 
+def do_rebuild(srcdir, destdir):
+    # Build list of files to restore
+    indexes = []
+    for dirpath, dirnames, filenames in os.walk(osp.join(srcdir, "index")):
+        for indexfile in filenames:
+            indexes.append(json.load(open(osp.join(dirpath, indexfile))))
+    # Put newest files first
+    indexes.sort(key=lambda x:x['mtime'], reverse=True)
+    # Iterate over files and copy data into place
+    for index in indexes:
+        s3name = "data/%s" % index['data']
+        srcname = s3_path_to_local(srcdir, s3name)
+        destname = osp.join(destdir, index['path'].lstrip(os.sep))
+        destbase = osp.dirname(destname)
+        if not osp.isdir(destbase): os.makedirs(destbase)
+        # Because we only copy if not exists, info from newer indexes takes precedence
+        if not osp.lexists(destname):
+            logger.info("COPY %s %s" % (srcname, destname))
+            shutil.copy2(srcname, destname)
+            os.utime(destname, (index['mtime'], index['mtime']))
+        else:
+            logger.debug("SKIP_EXISTS %s %s" % (srcname, destname))
+
 def main(argv):
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='cmd_name', help='command to run')
@@ -323,6 +348,9 @@ def main(argv):
     p_download = subparsers.add_parser('download', help='pull down all files from normal S3')
     p_download.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
     p_download.add_argument("download_dir", metavar="DOWNLOAD_DIR")
+    p_rebuild = subparsers.add_parser('rebuild', help='convert hashed names back to original structure')
+    p_rebuild.add_argument("download_dir", metavar="DOWNLOAD_DIR")
+    p_rebuild.add_argument("rebuild_dir", metavar="REBUILD_DIR")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
@@ -348,6 +376,8 @@ def main(argv):
         do_thaw(s3bucket, config['restore_for_days'], config['restore_gb_per_hr'])
     elif args.cmd_name == 'download':
         do_download(s3bucket, args.download_dir)
+    elif args.cmd_name == 'rebuild':
+        do_rebuild(args.download_dir, args.rebuild_dir)
     else:
         assert False, "Shouldn't be able to get here!"
 
