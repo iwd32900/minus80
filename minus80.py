@@ -65,9 +65,34 @@ Restore proceeds in three stages: 'thaw', 'download', and 'rebuild'.
 2.  Download.  The download command will pull down a perfect copy of all
     the data in your S3 bucket.  If any of it has been transferred to
     Glacier, you should run 'thaw' first and wait 5 hours after it finishes.
+    Existing files of the right size will be skipped, allowing you to
+    resume an interrupted download.
 
 3.  Rebuild.  The rebuild command will re-organize the downloaded data into
     a reasonable approximation of the structure you archived originally.
+    Existing files of the right size will be skipped, so you'll usually
+    want to target the restore to an empty directory.
+
+
+Deleting Things
+===============
+Minus80 is designed to back up things that you want to keep, well, forever.
+But sometimes forever is too long.  Here are some options:
+
+- If you're moving to a different backup solution and no longer want this
+  one, you can delete the whole S3 bucket through the AWS control panel.
+
+- If you want to get rid of very old stuff, you can use an Amazon
+  lifecycle rule to e.g. delete everything over 10 years old.
+
+- If you want to get rid of an individual file that should have never
+  been committed to backup, you need to know its hash.  If you still have
+  the file, you can calculate its hash with the widely available `shasum`
+  command line tool.  If you have the file name and the SQLite database,
+  you can look up the hash.  If you have neither, you'll have to download
+  all of index/ and search through it to find the file you want.  With the
+  hash in hand, you can then remove data/DATA_HASH using the S3 web control
+  panel.  To remove all trace of the file, remove index/DATA_HASH as well.
 
 
 Data Format
@@ -97,6 +122,10 @@ This is purely for efficiency -- if a file's size and mtime have not changed
 since the last backup, it is assumed to already be in the archive, and is skipped.
 This saves recalculating hashes for thousands of files.  However, if the local
 database is deleted, the next backup attempt will verify that each file is in S3.
+
+For convenience, the S3 bucket also contains a copy of the current version of
+minus80 (this file), as README.txt, and a file LAST_UPDATE.txt containing the
+time of the last backup run as YYYY-MM-DD HH:MM:SS (UTC time zone).
 
 
 Philosophy
@@ -135,7 +164,7 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 
 import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
 import os.path as osp
@@ -235,6 +264,7 @@ def do_archive(filename_iter, s3bucket, db):
     # Make sure current documentation exists in bucket.
     # We actually upload this whole file, to provide unambiguous info and a way to restore.
     upload_file(s3bucket, "README_%s.txt" % VERSION, __file__)
+    upload_string(s3bucket, "LAST_UPDATE.txt", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), replace=True)
     for relfile in filename_iter:
         try:
             absfile = osp.realpath(relfile) # eliminates symbolic links and does abspath()
@@ -331,15 +361,16 @@ def do_rebuild(srcdir, destdir):
         destbase = osp.dirname(destname)
         if not osp.isdir(destbase): os.makedirs(destbase)
         # Because we only copy if not exists, info from newer indexes takes precedence
-        if not osp.lexists(destname):
+        if osp.lexists(destname) and osp.getsize(srcname) == osp.getsize(destname):
+            logger.debug("SKIP_EXISTS %s %s" % (srcname, destname))
+        else:
             logger.info("COPY %s %s" % (srcname, destname))
             shutil.copy2(srcname, destname)
             os.utime(destname, (index['mtime'], index['mtime']))
-        else:
-            logger.debug("SKIP_EXISTS %s %s" % (srcname, destname))
 
 def main(argv):
     parser = argparse.ArgumentParser()
+    parser.add_argument('-v', '--verbose', default=0, action='count')
     subparsers = parser.add_subparsers(dest='cmd_name', help='command to run')
     p_archive = subparsers.add_parser('archive', help='store files listed on stdin to S3/Glacier')
     p_archive.add_argument("config", metavar="CONFIG.json", type=argparse.FileType('r'))
@@ -353,7 +384,8 @@ def main(argv):
     p_rebuild.add_argument("rebuild_dir", metavar="REBUILD_DIR")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
+    log_level = [logging.WARNING, logging.INFO, logging.DEBUG][min(2, args.verbose)]
+    logging.basicConfig(level=log_level, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
     logging.getLogger("boto").setLevel(logging.INFO)
     global logger
     logger = logging
