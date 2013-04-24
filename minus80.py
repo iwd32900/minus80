@@ -164,7 +164,7 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.2.1'
+VERSION = '0.2.2'
 
 import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
 import os.path as osp
@@ -367,8 +367,11 @@ def do_rebuild(srcdir, destdir):
             logger.debug("SKIP_EXISTS %s %s" % (srcname, destname))
         else:
             logger.info("COPY %s %s" % (srcname, destname))
-            shutil.copy2(srcname, destname)
-            os.utime(destname, (index['mtime'], index['mtime']))
+            try:
+                shutil.copy2(srcname, destname)
+                os.utime(destname, (index['mtime'], index['mtime']))
+            except Exception, ex:
+                logger.error("ERROR %s %s %s" % (srcname, destname, ex))
 
 def main(argv):
     parser = argparse.ArgumentParser()
