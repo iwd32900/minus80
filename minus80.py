@@ -314,6 +314,8 @@ def do_thaw(s3bucket, for_days, gb_per_hr):
         if key.storage_class != 'GLACIER':
             logger.debug("NOT_FROZEN %s" % key.name)
             continue
+        # issue a HEAD request, otherwise expiry_date and ongoing_restore are None
+        key = s3bucket.get_key(key.name)
         if key.expiry_date:
             logger.debug("THAW_DONE %s" % key.name)
             continue
