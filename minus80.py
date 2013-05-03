@@ -6,6 +6,13 @@ If you're reading this on Amazon, this file both describes the data format and
 contains code for restoring the backup to your local computer.  Keep reading.
 
 
+Dependencies
+============
+Minus80 was developed and tested with Boto 2.8.0 and Python 2.7.3 (because Boto
+doesn't support Python 3 yet).  Hopefully backwards-compatible versions will
+still be available by the time you want to restore from this backup...
+
+
 Getting Started
 ===============
 Sign up for Amazon Web Services (AWS) at http://aws.amazon.com/
@@ -164,7 +171,7 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.2.2'
+VERSION = '0.2.3'
 
 import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
 import os.path as osp
