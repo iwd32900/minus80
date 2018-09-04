@@ -124,6 +124,14 @@ All the metadata for various instances of a particular piece of content are stor
 under a common prefix (DATA_HASH) to make it feasible to purge all aliases to a
 particular bit of content from the archive if e.g. it was included by mistake.
 
+The metadata is also stored in
+
+    stream/TIMESTAMP_INFO_HASH.json
+
+where TIMESTAMP is an ISO8601 basic datetime in UTC, like 2015-07-23T16:17:00Z.
+This enables file sync across multiple computers, assuming your clock is correct,
+because temporal order matches Amazon's traversal order (lexicographic).
+
 Once files have been backed up, this is recorded in a local SQLite database.
 This is purely for efficiency -- if a file's size and mtime have not changed
 since the last backup, it is assumed to already be in the archive, and is skipped.
@@ -141,7 +149,7 @@ Minus80 is a tool in the Unix tradition.  This means it tries to be simple and m
 and not re-invent functionality that's available elsewhere. Thus:
 
 - The only way to specify files is as a list of names, one per line, on stdin.
-  Expected usage is to pipe the output of `find` to Minus80,
+  Expected usage is to pipe the output of `find` to minus80,
   but you could also have a manually curated backup list.
   It does not currently support null-separated output (-print0), because
   I assume you are a sane human and do not have newlines in your filenames.
@@ -171,14 +179,16 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.2.3'
+VERSION = '0.3.0'
 
 import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
 import os.path as osp
 import boto
 
 def init_db(dbpath):
-    db = sqlite3.connect(osp.expanduser(dbpath))
+    # PARSE_DECLTYPES causes TIMESTAMP columns to be read in as datetime objects.
+    db = sqlite3.connect(osp.expanduser(dbpath), detect_types=sqlite3.PARSE_DECLTYPES)
+    db.row_factory = sqlite3.Row
     with db:
         db.executescript("""
             CREATE TABLE IF NOT EXISTS files (
@@ -188,7 +198,7 @@ def init_db(dbpath):
                 size INTEGER NOT NULL,
                 infohash TEXT NOT NULL,
                 datahash TEXT NOT NULL,
-                updated INTEGER NOT NULL DEFAULT (STRFTIME('%s','now'))
+                updated TIMESTAMP NOT NULL DEFAULT (DATETIME('now'))
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_files_1 ON files (abspath, mtime, size);
             """)
@@ -285,7 +295,7 @@ def do_archive(filename_iter, s3bucket, db):
             fsize = osp.getsize(absfile)
             known_file = db.execute("SELECT updated FROM files WHERE abspath = ? AND mtime = ? AND size = ?", (absfile, mtime, fsize)).fetchone() # or None
             if known_file is not None:
-                logger.info("SKIP_KNOWN %s %s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(known_file[0])), absfile))
+                logger.info("SKIP_KNOWN %s %s" % (known_file[0].strftime("%Y-%m-%d %H:%M:%S"), absfile))
                 continue
             # Can't skip it.  Calculate the hashes!
             datahash = hash_file_content(absfile)
@@ -294,17 +304,29 @@ def do_archive(filename_iter, s3bucket, db):
             indexkey = "index/%s/%s.json" % (datahash, infohash)
             datakey = "data/%s" % datahash
             # Upload the actual file contents, if needed.
-            replace_index = False
             logger.debug("UPLOAD_READY %s %s" % (datakey, absfile))
-            if upload_file(s3bucket, datakey, absfile):
-                logger.info("UPLOAD_DONE %s %s" % (datakey, absfile))
-                replace_index = True
+            did_upload = upload_file(s3bucket, datakey, absfile)
+            if did_upload:
+                # If file has been modified while we were hashing, abort.  We'll get it next time through.
+                if mtime != osp.getmtime(absfile) or fsize != osp.getsize(absfile):
+                    logger.warning("CONCURENT_MODIFICATION %s" % absfile)
+                    # We uploaded on this pass, so content is likely wrong.  Remove it.
+                    s3bucket.delete_key(datakey)
+                    continue
+                else:
+                    logger.info("UPLOAD_DONE %s %s" % (datakey, absfile))
             else:
                 logger.info("UPLOAD_EXISTS %s %s" % (datakey, absfile))
             # Upload the metadata, if needed.
             logger.debug("INDEX_READY %s %s" % (indexkey, absfile))
-            if upload_string(s3bucket, indexkey, fileinfo, replace=replace_index):
+            if upload_string(s3bucket, indexkey, fileinfo, replace=did_upload):
                 logger.info("INDEX_DONE %s %s" % (indexkey, absfile))
+                # Post timestamped metadata to allow syncing with the archive.
+                now = datetime.datetime.utcnow().replace(microsecond=0).isoformat()
+                streamkey = "stream/%sZ_%s.json" % (now, infohash)
+                logger.debug("STREAM_READY %s %s" % (streamkey, absfile))
+                upload_string(s3bucket, streamkey, fileinfo)
+                logger.info("STREAM_DONE %s %s" % (streamkey, absfile))
             else:
                 logger.info("INDEX_EXISTS %s %s" % (indexkey, absfile))
             # Note to self: we've now backed this file up.
@@ -312,7 +334,7 @@ def do_archive(filename_iter, s3bucket, db):
                 db.execute("INSERT INTO files (abspath, mtime, size, infohash, datahash) VALUES (?, ?, ?, ?, ?)",
                     (absfile, mtime, fsize, infohash, datahash))
         except Exception, ex:
-            logger.error("ERROR %s %s" % (relfile, ex))
+            logger.exception("ERROR %s %s" % (relfile, ex))
 
 def do_thaw(s3bucket, for_days, gb_per_hr):
     sec_per_byte = 1. / (gb_per_hr * 1.0e9 / 3600.)
@@ -352,7 +374,7 @@ def do_download(s3bucket, destdir):
             key.get_contents_to_filename(localname)
             logger.info("DOWNLOAD_DONE %s %s" % (key.name, localname))
         except Exception, ex:
-            logger.error("ERROR %s %s" % (key.name, ex))
+            logger.exception("ERROR %s %s" % (key.name, ex))
 
 def do_rebuild(srcdir, destdir):
     # Build list of files to restore
@@ -378,7 +400,7 @@ def do_rebuild(srcdir, destdir):
                 shutil.copy2(srcname, destname)
                 os.utime(destname, (index['mtime'], index['mtime']))
             except Exception, ex:
-                logger.error("ERROR %s %s %s" % (srcname, destname, ex))
+                logger.exception("ERROR %s %s %s" % (srcname, destname, ex))
 
 def main(argv):
     parser = argparse.ArgumentParser()

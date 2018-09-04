@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+   <key>Label</key>
+   <string>com.user.loginscript</string>
+   <key>Program</key>
+   <string>/Users/ian/code/minus80/photo_backup.sh</string>
+   <key>StandardOutPath</key>
+   <string>/Users/ian/code/minus80/log.stdout</string>
+   <key>StandardErrorPath</key>
+   <string>/Users/ian/code/minus80/log.stderr</string>
+   <key>WorkingDirectory</key>
+   <string>/Users/ian/code/minus80</string>
+   <key>RunAtLoad</key>
+   <true/>
+</dict>
+</plist>
