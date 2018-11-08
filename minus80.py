@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 This is -80 (minus80), a tool for long-term archival backup to Amazon S3 and Glacier.
 
@@ -8,44 +8,44 @@ contains code for restoring the backup to your local computer.  Keep reading.
 
 Dependencies
 ============
-Minus80 was developed and tested with Boto 2.8.0 and Python 2.7.3 (because Boto
-doesn't support Python 3 yet).  Hopefully backwards-compatible versions will
-still be available by the time you want to restore from this backup...
+Minus80 was developed and tested with Boto3 1.9.23 and Python 3.6.
+Hopefully backwards-compatible versions will still be available
+by the time you want to restore from this backup...
 
 
 Getting Started
 ===============
 Sign up for Amazon Web Services (AWS) at http://aws.amazon.com/
-You'll need to sign up for (at a minimum) S3 and Glacier.
 
 Create a configuration file in JSON format that looks like this:
 
     {
-        "aws_access_key": "XXX",
-        "aws_secret_key": "XXX",
+        "credentials": {
+            "profile_name": "XXX",
+            "aws_access_key_id": "XXX",
+            "aws_secret_access_key": "XXX"
+        },
         "aws_s3_bucket": "XXX",
-        "days_to_glacier": 30,
         "restore_for_days": 30,
-        "restore_gb_per_hr": 1,
         "file_database": "~/.minus80.sqlite3"
     }
 
 Replace the "XXX" with appropriate values from your new AWS acount.
+You can supply a profile, or access key and secret key, or none of the above
+(in which case defaults will be used, based on boto3's search process).
 Your bucket name must be globally unique, so pick something no one else
 is likely to have used.
-The "days_to_glacier" is optional;  if omitted, Glacier will not be used.
 
 
 Usage - Backup
 ==============
 Storage costs can be reduced by setting up a bucket lifecycle rule that transfers
 data from S3 storage to Glacier storage.  Since most of the bytes are in the data/
-folder, I would suggest only archiving that folder, say, 30 days after upload.
+folder, I would suggest only archiving that folder, say, 7 days after upload.
 See http://docs.aws.amazon.com/AmazonS3/latest/dev/object-lifecycle-mgmt.html
 
-By default, a Glacier archive rule will be set on the bucket for you if your
-config file includes a 'days_to_glacier' entry.  You can always delete or
-disable it later from the AWS control panel.
+A CloudFormation template is provided to create a bucket with a suitable policy.
+The easiest way to use it is through the CloudFormation web console.
 
 
 Usage - Restore
@@ -55,23 +55,12 @@ Restore proceeds in three stages: 'thaw', 'download', and 'rebuild'.
 1.  Thaw.  The thaw command traverses the entire S3 bucket.  Any object
     that has been moved to Glacier is restored to S3, for a period of
     `restore_for_days` days.  According to Glacier documentation,
-    each thaw command will take 3-5 hours to complete;  after that, files
+    each thaw command will take up to 12 hours to complete;  after that, files
     can be downloaded from S3 normally.
-
-    You will be charged based on your peak hourly restore rate.  My reading
-    of the rules is that you will charged up to $7.20 multiplied by your
-    peak restore rate in gigabytes per hour.  Charges may be less depending
-    on how much you have stored with Amazon, but since we're contemplating
-    a full restore, probably not much less.  The thaw command will try to
-    limit restores to a rate of `restore_gb_per_hr`.  At a setting of 1, it
-    will take 100 hours (~4 days) to thaw 100 GB worth of data, and you
-    should leave your computer running (not sleeping) that whole time.
-    Additional charges will apply for S3 storage during the restore period,
-    and bandwidth for downloading.
 
 2.  Download.  The download command will pull down a perfect copy of all
     the data in your S3 bucket.  If any of it has been transferred to
-    Glacier, you should run 'thaw' first and wait 5 hours after it finishes.
+    Glacier, you should run 'thaw' first and wait 12 hours after it finishes.
     Existing files of the right size will be skipped, allowing you to
     resume an interrupted download.
 
@@ -179,11 +168,12 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 
-import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys, time
+import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys
 import os.path as osp
-import boto
+import boto3
+from botocore.exceptions import ClientError
 
 def init_db(dbpath):
     # PARSE_DECLTYPES causes TIMESTAMP columns to be read in as datetime objects.
@@ -204,26 +194,9 @@ def init_db(dbpath):
             """)
     return db
 
-def set_lifecycle(s3bucket, days_to_glacier):
-    import boto.s3.lifecycle as lc
-    RULE_ID = 'minus80_data_archive_rule'
-    try:
-        lifecycle = s3bucket.get_lifecycle_config()
-    except boto.exception.S3ResponseError, ex:
-        lifecycle = lc.Lifecycle()
-    for rule in lifecycle:
-        if rule.id == RULE_ID:
-            logger.debug("HAS_LIFECYCLE not updating existing lifecycle rules on bucket")
-            break
-    else:
-        lifecycle.append(lc.Rule(RULE_ID, 'data/', 'Enabled',
-            transition=lc.Transition(days=days_to_glacier, storage_class='GLACIER')))
-        s3bucket.configure_lifecycle(lifecycle)
-        logger.info("SET_LIFECYCLE setting default transition-to-Glacier rule on bucket")
-
 def hash_string(s, hashname='sha1'):
     hashfunc = hashlib.new(hashname)
-    hashfunc.update(s)
+    hashfunc.update(s.encode())
     return hashfunc.hexdigest()
 
 def hash_file_content(absfile, hashname='sha1', chunk=1024*1024):
@@ -235,22 +208,30 @@ def hash_file_content(absfile, hashname='sha1', chunk=1024*1024):
         hashfunc.update(data)
     return hashfunc.hexdigest()
 
+def key_exists(key):
+     try:
+         key.load() # Uses HEAD to check if this key exists, or gives 404
+         return True
+     except ClientError as ex:
+         if ex.response['Error']['Code'] == '404':
+             return False
+         else:
+             raise # some other API failure
+
 def upload_string(s3bucket, key_name, s, replace=False):
     """Returns True if data was transferred, False if it was already there."""
-    # Uses HEAD to check if this key exists, or returns None
-    key = s3bucket.get_key(key_name)
-    if not replace and key is not None: return False
-    key = s3bucket.new_key(key_name)
-    key.set_contents_from_string(s, replace=replace)
+    key = s3bucket.Object(key_name)
+    if not replace and key_exists(key):
+        return False
+    key.put(Body=s.encode())
     return True
 
 def upload_file(s3bucket, key_name, filename, replace=False):
     """Returns True if data was transferred, False if it was already there."""
-    # Uses HEAD to check if this key exists, or returns None
-    key = s3bucket.get_key(key_name)
-    if not replace and key is not None: return False
-    key = s3bucket.new_key(key_name)
-    key.set_contents_from_filename(filename, replace=replace)
+    key = s3bucket.Object(key_name)
+    if not replace and key_exists(key):
+        return False
+    key.upload_file(filename)
     return True
 
 def get_file_info(absfile, datahash):
@@ -311,7 +292,7 @@ def do_archive(filename_iter, s3bucket, db):
                 if mtime != osp.getmtime(absfile) or fsize != osp.getsize(absfile):
                     logger.warning("CONCURENT_MODIFICATION %s" % absfile)
                     # We uploaded on this pass, so content is likely wrong.  Remove it.
-                    s3bucket.delete_key(datakey)
+                    s3bucket.Object(datakey).delete()
                     continue
                 else:
                     logger.info("UPLOAD_DONE %s %s" % (datakey, absfile))
@@ -333,48 +314,56 @@ def do_archive(filename_iter, s3bucket, db):
             with db:
                 db.execute("INSERT INTO files (abspath, mtime, size, infohash, datahash) VALUES (?, ?, ?, ?, ?)",
                     (absfile, mtime, fsize, infohash, datahash))
-        except Exception, ex:
+        except Exception as ex:
             logger.exception("ERROR %s %s" % (relfile, ex))
 
-def do_thaw(s3bucket, for_days, gb_per_hr):
-    sec_per_byte = 1. / (gb_per_hr * 1.0e9 / 3600.)
+def is_thawed(key):
+    return key.restore and 'ongoing-request="false"' in key.restore and 'expiry-date=' in key.restore
+
+def is_thawing(key):
+    return key.restore and 'ongoing-request="true"' in key.restore
+
+def do_thaw(s3bucket, for_days):
     thawing_objs = 0
-    for key in s3bucket.list():
+    for key in s3bucket.objects.filter(Prefix="data/"):
         if key.storage_class != 'GLACIER':
-            logger.debug("NOT_FROZEN %s" % key.name)
+            logger.debug("NOT_FROZEN %s" % key.key)
             continue
-        # issue a HEAD request, otherwise expiry_date and ongoing_restore are None
-        key = s3bucket.get_key(key.name)
-        if key.expiry_date:
-            logger.debug("THAW_DONE %s" % key.name)
+        key = key.Object() # get a full Object, instead of an ObjectSummary
+        if is_thawed(key):
+            logger.debug("THAW_DONE %s" % key.key)
             continue
         thawing_objs += 1
-        if key.ongoing_restore:
-            logger.debug("THAW_IN_PROGRESS %s" % key.name)
+        if is_thawing(key):
+            logger.debug("THAW_IN_PROGRESS %s" % key.key)
             continue
-        logger.debug("READY_THAW %s" % key.name)
-        time.sleep(sec_per_byte * key.size)
-        key.restore(for_days)
-        logger.info("THAW_STARTED %s" % key.name)
+        logger.debug("READY_THAW %s" % key.key)
+        key.restore_object(RestoreRequest={
+            'Days': for_days,
+            'GlacierJobParameters': {
+                'Tier': 'Bulk' # 'Standard'|'Bulk'|'Expedited'
+            }})
+        logger.info("THAW_STARTED %s" % key.key)
     if thawing_objs:
-        logger.warning("Thawing %i objects; should be complete by %s" % (thawing_objs, datetime.datetime.now() + datetime.timedelta(hours=5)))
+        logger.warning("Thawing %i objects; should be complete by %s" % (thawing_objs, datetime.datetime.now() + datetime.timedelta(hours=12)))
     else:
         logger.warning("All objects thawed; ready to start download")
 
 def do_download(s3bucket, destdir):
-    for key in s3bucket.list():
-        try:
-            localname = s3_path_to_local(destdir, key.name)
-            if osp.lexists(localname) and osp.getsize(localname) == key.size:
-                logger.debug("EXISTS %s" % localname)
-                continue
-            localdir = osp.dirname(localname)
-            if not osp.isdir(localdir): os.makedirs(localdir)
-            logger.debug("DOWNLOAD_READY %s %s" % (key.name, localname))
-            key.get_contents_to_filename(localname)
-            logger.info("DOWNLOAD_DONE %s %s" % (key.name, localname))
-        except Exception, ex:
-            logger.exception("ERROR %s %s" % (key.name, ex))
+    for prefix in ["index/", "data/"]:
+        for key in s3bucket.objects.filter(Prefix=prefix):
+            try:
+                localname = s3_path_to_local(destdir, key.key)
+                if osp.lexists(localname) and osp.getsize(localname) == key.size:
+                    logger.debug("EXISTS %s" % localname)
+                    continue
+                localdir = osp.dirname(localname)
+                if not osp.isdir(localdir): os.makedirs(localdir)
+                logger.debug("DOWNLOAD_READY %s %s" % (key.key, localname))
+                key.Object().download_file(localname)
+                logger.info("DOWNLOAD_DONE %s %s" % (key.key, localname))
+            except Exception as ex:
+                logger.exception("ERROR %s %s" % (key.key, ex))
 
 def do_rebuild(srcdir, destdir):
     # Build list of files to restore
@@ -399,7 +388,7 @@ def do_rebuild(srcdir, destdir):
             try:
                 shutil.copy2(srcname, destname)
                 os.utime(destname, (index['mtime'], index['mtime']))
-            except Exception, ex:
+            except Exception as ex:
                 logger.exception("ERROR %s %s %s" % (srcname, destname, ex))
 
 def main(argv):
@@ -418,34 +407,35 @@ def main(argv):
     p_rebuild.add_argument("rebuild_dir", metavar="REBUILD_DIR")
     args = parser.parse_args(argv)
 
-    log_level = [logging.WARNING, logging.INFO, logging.DEBUG][min(2, args.verbose)]
-    logging.basicConfig(level=log_level, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
-    logging.getLogger("boto").setLevel(logging.INFO)
+    boto_log_level = [logging.WARNING, logging.INFO, logging.DEBUG][min(1, args.verbose)] # max of INFO
+    logging.basicConfig(level=boto_log_level, format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
+
     global logger
-    logger = logging
+    logger = logging.getLogger("minus80")
+    app_log_level = [logging.WARNING, logging.INFO, logging.DEBUG][min(2, args.verbose)]
+    logger.setLevel(app_log_level)
 
     # Shared initialization for subcommands:
     if 'config' in args:
         config = json.load(args.config)
         db = init_db(config['file_database'])
 
-        s3conn = boto.connect_s3(config['aws_access_key'], config['aws_secret_key'])
-        s3bucket = s3conn.create_bucket(config['aws_s3_bucket']) # just returns Bucket if exists
+        session = boto3.Session(**config['credentials'])
+        s3conn = session.resource('s3')
+        s3bucket = s3conn.Bucket(config['aws_s3_bucket']) # Bucket must already exist
 
     # Run subcommand
     if args.cmd_name == 'archive':
-        if 'days_to_glacier' in config:
-            set_lifecycle(s3bucket, config['days_to_glacier'])
         filename_iter = (line.rstrip("\r\n") for line in sys.stdin)
         do_archive(filename_iter, s3bucket, db)
     elif args.cmd_name == 'thaw':
-        do_thaw(s3bucket, config['restore_for_days'], config['restore_gb_per_hr'])
+        do_thaw(s3bucket, config['restore_for_days'])
     elif args.cmd_name == 'download':
         do_download(s3bucket, args.download_dir)
     elif args.cmd_name == 'rebuild':
         do_rebuild(args.download_dir, args.rebuild_dir)
     else:
-        assert False, "Shouldn't be able to get here!"
+        parser.print_help()
 
     return 0
 
