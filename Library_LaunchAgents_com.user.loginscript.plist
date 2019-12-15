@@ -14,5 +14,7 @@
    <string>/Users/ian/code/minus80</string>
    <key>RunAtLoad</key>
    <true/>
+   <key>NSPhotoLibraryUsageDescription</key>
+   <string>This app requires access to the photo library.</string>
 </dict>
 </plist>
