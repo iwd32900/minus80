@@ -20,5 +20,5 @@ Resources:
             Prefix: data/
             Status: Enabled
             Transitions:
-              - StorageClass: GLACIER
+              - StorageClass: DEEP_ARCHIVE
                 TransitionInDays: 7

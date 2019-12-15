@@ -326,7 +326,7 @@ def is_thawing(key):
 def do_thaw(s3bucket, for_days):
     thawing_objs = 0
     for key in s3bucket.objects.filter(Prefix="data/"):
-        if key.storage_class != 'GLACIER':
+        if key.storage_class not in ('GLACIER', 'DEEP_ARCHIVE'):
             logger.debug("NOT_FROZEN %s" % key.key)
             continue
         key = key.Object() # get a full Object, instead of an ObjectSummary
