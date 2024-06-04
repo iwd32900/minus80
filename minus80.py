@@ -168,12 +168,22 @@ all data into Glacier for permanent storage.
 """
 # MAKE SURE to increment this when code is updated,
 # so a new copy gets stored in the archive!
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 
 import argparse, datetime, hashlib, json, logging, os, shutil, sqlite3, sys
 import os.path as osp
 import boto3
 from botocore.exceptions import ClientError
+
+# Now required by Python 3.12
+def adapt_datetime_iso(val):
+    """Adapt datetime.datetime to timezone-naive ISO 8601 date."""
+    return val.isoformat()
+def convert_datetime(val):
+    """Convert ISO 8601 datetime to datetime.datetime object."""
+    return datetime.datetime.fromisoformat(val.decode())
+sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+sqlite3.register_converter("timestamp", convert_datetime)
 
 def init_db(dbpath):
     # PARSE_DECLTYPES causes TIMESTAMP columns to be read in as datetime objects.
@@ -193,6 +203,10 @@ def init_db(dbpath):
             CREATE UNIQUE INDEX IF NOT EXISTS idx_files_1 ON files (abspath, mtime, size);
             """)
     return db
+
+def utcnow():
+    '''Replicate behavior of utcnow() since its deprecated in Python 3.12+'''
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
 def hash_string(s, hashname='sha1'):
     hashfunc = hashlib.new(hashname)
@@ -262,7 +276,7 @@ def do_archive(filename_iter, s3bucket, db):
     # Make sure current documentation exists in bucket.
     # We actually upload this whole file, to provide unambiguous info and a way to restore.
     upload_file(s3bucket, "README_%s.txt" % VERSION, __file__)
-    upload_string(s3bucket, "LAST_UPDATE.txt", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), replace=True)
+    upload_string(s3bucket, "LAST_UPDATE.txt", utcnow().strftime("%Y-%m-%d %H:%M:%S"), replace=True)
     for relfile in filename_iter:
         try:
             absfile = osp.realpath(relfile) # eliminates symbolic links and does abspath()
@@ -303,7 +317,7 @@ def do_archive(filename_iter, s3bucket, db):
             if upload_string(s3bucket, indexkey, fileinfo, replace=did_upload):
                 logger.info("INDEX_DONE %s %s" % (indexkey, absfile))
                 # Post timestamped metadata to allow syncing with the archive.
-                now = datetime.datetime.utcnow().replace(microsecond=0).isoformat()
+                now = utcnow().replace(microsecond=0).isoformat()
                 streamkey = "stream/%sZ_%s.json" % (now, infohash)
                 logger.debug("STREAM_READY %s %s" % (streamkey, absfile))
                 upload_string(s3bucket, streamkey, fileinfo)
